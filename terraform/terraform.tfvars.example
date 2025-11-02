@@ -1,0 +1,16 @@
+aws_region = "us-east-1"
+environment = "production"
+project_name = "spring-boot-eks"
+
+cluster_name = "spring-boot-cluster"
+instance_types = ["t3.medium"]
+desired_size = 2
+min_size = 1
+max_size = 4
+
+vpc_cidr = "10.0.0.0/16"
+availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+
+db_username = "admin"
+db_password = "YourSecurePassword123!"
+db_name = "spring_app_db"

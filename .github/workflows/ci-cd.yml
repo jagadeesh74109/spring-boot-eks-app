@@ -1,0 +1,225 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: spring-boot-eks
+  EKS_CLUSTER_NAME: spring-boot-cluster
+  K8S_NAMESPACE: spring-app
+
+jobs:
+  test:
+    name: Test Application
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Run tests
+      run: mvn clean test
+
+    - name: Generate test report
+      if: always()
+      uses: dorny/test-reporter@v1
+      with:
+        name: Maven Tests
+        path: target/surefire-reports/*.xml
+        reporter: java-junit
+
+  build:
+    name: Build and Push Docker Image
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Build with Maven
+      run: mvn clean package -DskipTests
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Extract metadata for Docker
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+        tags: |
+          type=ref,event=branch
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Scan image with Trivy
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  deploy:
+    name: Deploy to EKS
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Create namespace if not exists
+      run: |
+        kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Create/Update ConfigMap
+      run: |
+        kubectl apply -f k8s/configmap.yml
+
+    - name: Create/Update Secret
+      run: |
+        kubectl create secret generic spring-app-secret \
+          --from-literal=DB_URL="${{ secrets.DB_URL }}" \
+          --from-literal=DB_USERNAME="${{ secrets.DB_USERNAME }}" \
+          --from-literal=DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+          --namespace=${{ env.K8S_NAMESPACE }} \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Deploy to EKS
+      run: |
+        export ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        export ECR_REPOSITORY=${{ env.ECR_REPOSITORY }}
+        export IMAGE_TAG=${{ github.sha }}
+        envsubst < k8s/deployment.yml | kubectl apply -f -
+        kubectl apply -f k8s/service.yml
+
+    - name: Wait for deployment
+      run: |
+        kubectl rollout status deployment/spring-app -n ${{ env.K8S_NAMESPACE }} --timeout=5m
+
+    - name: Get deployment status
+      run: |
+        kubectl get pods -n ${{ env.K8S_NAMESPACE }}
+        kubectl get svc -n ${{ env.K8S_NAMESPACE }}
+
+    - name: Get LoadBalancer URL
+      id: get-url
+      run: |
+        echo "Waiting for LoadBalancer URL..."
+        for i in {1..30}; do
+          URL=$(kubectl get svc spring-app-service -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          if [ ! -z "$URL" ]; then
+            echo "url=$URL" >> $GITHUB_OUTPUT
+            echo "Application URL: http://$URL"
+            break
+          fi
+          echo "Waiting... ($i/30)"
+          sleep 10
+        done
+
+    - name: Health check
+      run: |
+        URL=${{ steps.get-url.outputs.url }}
+        if [ ! -z "$URL" ]; then
+          for i in {1..10}; do
+            if curl -f http://$URL/actuator/health; then
+              echo "Health check passed!"
+              exit 0
+            fi
+            echo "Health check attempt $i failed, retrying..."
+            sleep 10
+          done
+          echo "Health check failed after 10 attempts"
+          exit 1
+        else
+          echo "LoadBalancer URL not available yet"
+        fi
+
+  notify:
+    name: Notify Deployment Status
+    needs: [test, build, deploy]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Deployment Summary
+      run: |
+        echo "## Deployment Summary 🚀" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Test Status:** ${{ needs.test.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build Status:** ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deploy Status:** ${{ needs.deploy.result }}" >> $GITHUB_STEP_SUMMARY
