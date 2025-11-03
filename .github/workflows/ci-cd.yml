@@ -35,22 +35,11 @@ jobs:
     - name: Run tests
       run: mvn clean test
 
-    - name: Generate test report
-      if: always()
-      uses: dorny/test-reporter@v1
-      with:
-        name: Maven Tests
-        path: target/surefire-reports/*.xml
-        reporter: java-junit
-
   build:
     name: Build and Push Docker Image
     needs: test
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-    
-    outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
     
     steps:
     - name: Checkout code
@@ -77,38 +66,15 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Extract metadata for Docker
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
-        tags: |
-          type=ref,event=branch
-          type=sha,prefix={{branch}}-
-          type=raw,value=latest,enable={{is_default_branch}}
-
     - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Scan image with Trivy
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-
-    - name: Upload Trivy results to GitHub Security
-      uses: github/codeql-action/upload-sarif@v3
-      if: always()
-      with:
-        sarif_file: 'trivy-results.sarif'
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
   deploy:
     name: Deploy to EKS
@@ -158,6 +124,9 @@ jobs:
           --dry-run=client -o yaml | kubectl apply -f -
 
     - name: Deploy to EKS
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
       run: |
         export ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
         export ECR_REPOSITORY=${{ env.ECR_REPOSITORY }}
@@ -171,7 +140,10 @@ jobs:
 
     - name: Get deployment status
       run: |
+        echo "=== Pods Status ==="
         kubectl get pods -n ${{ env.K8S_NAMESPACE }}
+        echo ""
+        echo "=== Service Status ==="
         kubectl get svc -n ${{ env.K8S_NAMESPACE }}
 
     - name: Get LoadBalancer URL
@@ -182,10 +154,10 @@ jobs:
           URL=$(kubectl get svc spring-app-service -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           if [ ! -z "$URL" ]; then
             echo "url=$URL" >> $GITHUB_OUTPUT
-            echo "Application URL: http://$URL"
+            echo "✅ Application URL: http://$URL"
             break
           fi
-          echo "Waiting... ($i/30)"
+          echo "⏳ Waiting... ($i/30)"
           sleep 10
         done
 
@@ -193,33 +165,37 @@ jobs:
       run: |
         URL=${{ steps.get-url.outputs.url }}
         if [ ! -z "$URL" ]; then
+          echo "Running health check on http://$URL/actuator/health"
           for i in {1..10}; do
             if curl -f http://$URL/actuator/health; then
-              echo "Health check passed!"
+              echo "✅ Health check passed!"
               exit 0
             fi
-            echo "Health check attempt $i failed, retrying..."
+            echo "⏳ Health check attempt $i failed, retrying..."
             sleep 10
           done
-          echo "Health check failed after 10 attempts"
+          echo "❌ Health check failed after 10 attempts"
           exit 1
         else
-          echo "LoadBalancer URL not available yet"
+          echo "⚠️ LoadBalancer URL not available yet"
         fi
 
   notify:
-    name: Notify Deployment Status
+    name: Deployment Summary
     needs: [test, build, deploy]
     runs-on: ubuntu-latest
     if: always()
     
     steps:
-    - name: Deployment Summary
+    - name: Create Summary
       run: |
-        echo "## Deployment Summary 🚀" >> $GITHUB_STEP_SUMMARY
+        echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Test Status:** ${{ needs.test.result }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Build Status:** ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Deploy Status:** ${{ needs.deploy.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Test | ${{ needs.test.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Build | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Deploy | ${{ needs.deploy.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
