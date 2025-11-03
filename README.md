@@ -38,3 +38,4 @@ See [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) for detailed instructions.
 ## License
 
 MIT
+# Deployed with GitHub Actions 🚀
