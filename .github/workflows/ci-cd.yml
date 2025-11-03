@@ -12,8 +12,8 @@ on:
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
-  ECR_REPOSITORY: spring-boot-eks
-  EKS_CLUSTER_NAME: spring-boot-cluster
+  ECR_REPOSITORY: sb-eks
+  EKS_CLUSTER_NAME: sb-cluster
   K8S_NAMESPACE: spring-app
 
 jobs:

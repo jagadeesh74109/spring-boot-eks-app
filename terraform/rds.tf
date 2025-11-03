@@ -43,7 +43,7 @@ module "rds" {
   password = var.db_password
   port     = 3306
 
-  multi_az               = true
+  multi_az               = false  # Single-AZ for cost savings
   db_subnet_group_name   = module.vpc.database_subnet_group_name
   vpc_security_group_ids = [aws_security_group.rds.id]
 
@@ -56,10 +56,9 @@ module "rds" {
   skip_final_snapshot     = true
   deletion_protection     = false
 
-  performance_insights_enabled          = true
-  performance_insights_retention_period = 7
-  create_monitoring_role                = true
-  monitoring_interval                   = 60
+  # Disable Performance Insights and Enhanced Monitoring
+  performance_insights_enabled = false
+  monitoring_interval          = 0
 
   parameters = [
     {

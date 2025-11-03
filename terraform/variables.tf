@@ -13,13 +13,13 @@ variable "environment" {
 variable "project_name" {
   description = "Project name"
   type        = string
-  default     = "spring-boot-eks"
+  default     = "sb-eks"
 }
 
 variable "cluster_name" {
   description = "EKS cluster name"
   type        = string
-  default     = "spring-boot-cluster"
+  default     = "sb-cluster"
 }
 
 variable "vpc_cidr" {

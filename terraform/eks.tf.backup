@@ -8,10 +8,8 @@ module "eks" {
   cluster_endpoint_public_access  = true
   cluster_endpoint_private_access = true
 
+  # Enable IRSA
   enable_irsa = true
-
-  # Enable cluster creator admin permissions
-  enable_cluster_creator_admin_permissions = true
 
   cluster_addons = {
     coredns = {
@@ -32,6 +30,7 @@ module "eks" {
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 
+  # EKS Managed Node Group
   eks_managed_node_groups = {
     main = {
       name = "ng-main"
@@ -45,6 +44,7 @@ module "eks" {
 
       disk_size = 50
 
+      # Use a shorter IAM role name
       iam_role_name            = "sb-node-role"
       iam_role_use_name_prefix = false
 
@@ -59,6 +59,7 @@ module "eks" {
     }
   }
 
+  # Cluster security group - allow all worker nodes to communicate
   cluster_security_group_additional_rules = {
     ingress_nodes_ephemeral_ports_tcp = {
       description                = "Nodes on ephemeral ports"
@@ -70,6 +71,7 @@ module "eks" {
     }
   }
 
+  # Node security group - allow necessary traffic
   node_security_group_additional_rules = {
     ingress_self_all = {
       description = "Node to node all ports/protocols"
@@ -106,6 +108,7 @@ module "eks" {
   }
 }
 
+# IRSA for EBS CSI Driver
 module "ebs_csi_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.0"
